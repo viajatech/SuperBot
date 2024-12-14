@@ -1,0 +1,153 @@
+#David Ruiz (@viajatech)
+#Licencia APACHE 2.0
+
+#Si utilizas mi script recuerda dar créditos (Apache 2.0) 
+#Se agradece tu estrellita en el repo de github
+#https://github.com/viajatech
+
+
+#pip install --upgrade transformers bitsandbytes gradio
+
+
+"""
+SuperBot by ViajaTech
+Ejemplo de chatbot con Gradio y modelo Llama-3.3-70B-Instruct cuantizado.
+"""
+
+import torch
+import gradio as gr
+import transformers
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import BitsAndBytesConfig
+
+# --------------------------------------------------------------------
+# CONFIGURACIÓN DE HILOS EN CPU (multithreading)
+# --------------------------------------------------------------------
+# Ajusta este valor según tu CPU (cantidad de cores/hilos).
+# Si lo dejas en None, PyTorch escogerá algo por defecto.
+NUM_CPU_THREADS = 4
+torch.set_num_threads(NUM_CPU_THREADS)
+
+# --------------------------------------------------------------------
+# CONFIGURACIÓN DEL MODELO
+# --------------------------------------------------------------------
+MODEL_ID = "meta-llama/Llama-3.3-70B-Instruct"
+
+# Configuración de cuantización con bitsandbytes
+# load_in_4bit=True -> 4 bits; (también podrías usar 8 bits si quieres)
+quant_config = BitsAndBytesConfig(
+    load_in_4bit=True,   # Cambia a True o False según la memoria disponible
+    # load_in_8bit=True  # Alternativa si prefieres 8 bits
+    bnb_4bit_use_double_quant=True,    # Opciones recomendadas
+    bnb_4bit_compute_dtype=torch.bfloat16
+)
+
+# Carga del tokenizer
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+
+# Carga del modelo con cuantización 4-bit
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    device_map="auto",
+    torch_dtype=torch.bfloat16,
+    quantization_config=quant_config
+)
+
+# --------------------------------------------------------------------
+# FUNCIÓN DE GENERACIÓN
+# --------------------------------------------------------------------
+def generate_response(chatbot_name, user_name, context, seed, max_tokens, user_input):
+    """
+    Genera la respuesta del modelo con base en:
+      - Nombre del Chatbot (string)
+      - Nombre del Usuario (string)
+      - Contexto o historia inicial (prompt de sistema)
+      - Semilla (seed) para reproducibilidad
+      - Número máximo de tokens (max_tokens)
+      - Entrada del usuario (user_input)
+    """
+
+    # Seteo de semilla para reproducibilidad (opcional)
+    if seed is not None and seed != 0:
+        torch.manual_seed(seed)
+        # Si deseas fijar semilla para cuda/cuDNN de manera determinista:
+        # torch.cuda.manual_seed_all(seed)
+
+    # Preparamos la conversación como lista de mensajes, 
+    # usando el chat templating de Transformers (si corresponde):
+    # Estructura: [ {"role": "system", "content": ...}, {"role": "user", "content": ...}, ... ]
+    messages = [
+        {"role": "system", "content": f"Actúa como {chatbot_name}. Contexto: {context}"},
+        {"role": "user", "content": f"({user_name} dice): {user_input}"}
+    ]
+
+    # Utilizando la API de pipeline con `TextGenerationPipeline` que soporta chat
+    # a partir de Transformers >=4.45.0
+    pipeline = transformers.pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        device_map="auto"
+    )
+
+    # Podemos limitar la longitud total generada con "max_new_tokens"
+    # Ojo, "max_length" es la longitud total (prompt + respuesta), 
+    # "max_new_tokens" limita la respuesta generada. 
+    # Ajustamos truncation a False para no truncar el input del usuario en caso de ser largo.
+    outputs = pipeline(
+        messages,
+        max_new_tokens=int(max_tokens),
+        truncation=False,
+        do_sample=True,     # sampling para respuestas más creativas
+        top_p=0.9,
+        temperature=0.8     # ajusta la temperatura para más/menos aleatoriedad
+    )
+
+    # El pipeline retorna una lista de dicts con "generated_text".
+    # Con chat, la respuesta final suele estar en `outputs[0]["generated_text"][-1]["content"]` o similar,
+    # pero si la versión de Transformers es anterior o distinta, puede variar.
+    # Para las versiones recientes, la parte generada que corresponde al rol "assistant" usualmente se halla en:
+    bot_reply = outputs[0]["generated_text"][-1]["content"] if "generated_text" in outputs[0] else outputs[0]["generated_text"]
+
+    return bot_reply
+
+# --------------------------------------------------------------------
+# INTERFAZ DE GRADIO
+# --------------------------------------------------------------------
+def gradio_interface():
+    with gr.Blocks() as demo:
+
+        gr.Markdown("# SuperBot by ViajaTech")
+        gr.Markdown("Ejemplo de ChatBot cuantizado (70B) usando Gradio + bitsandbytes (4-bit).")
+
+        # Inputs de configuración
+        chatbot_name = gr.Textbox(label="Nombre del Chatbot", value="SuperBot by ViajaTech")
+        user_name = gr.Textbox(label="Nombre del Usuario", value="Usuario")
+        context = gr.Textbox(label="Contexto/Historia Inicial", 
+                             value="Eres un asistente útil y creativo, listo para ayudar.")
+        seed = gr.Number(label="Seed (0 = aleatorio)", value=0)
+        max_tokens = gr.Slider(minimum=1, maximum=10000, step=1, value=512, label="Tokens máximos de respuesta")
+
+        user_input = gr.Textbox(label="Mensaje del Usuario")
+
+        # Salida
+        output = gr.Textbox(label="Respuesta del Bot")
+
+        # Botón para generar
+        run_button = gr.Button("Generar Respuesta")
+
+        # Lógica de llamado
+        run_button.click(
+            fn=generate_response,
+            inputs=[chatbot_name, user_name, context, seed, max_tokens, user_input],
+            outputs=[output]
+        )
+
+    return demo
+
+# Ejecutar interfaz
+if __name__ == "__main__":
+    demo = gradio_interface()
+    # Puedes cambiar server_name e inputs para que sea accesible en LAN
+    # o por un tunel colab. Ejemplo: server_name="0.0.0.0"
+    demo.launch(server_name="0.0.0.0", share=False)
